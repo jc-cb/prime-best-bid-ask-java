@@ -24,11 +24,7 @@ import javax.crypto.spec.SecretKeySpec;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
-import java.util.Base64;
-import java.util.Collections;
-import java.util.Map;
-import java.util.TreeMap;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.*;
 
 public class BestBidAskPrinter {
 
@@ -40,8 +36,10 @@ public class BestBidAskPrinter {
         final TreeMap<Double, Double> bids = new TreeMap<>(Collections.reverseOrder());
         final TreeMap<Double, Double> asks = new TreeMap<>();
     }
-    private final Map<String, Book> books = new ConcurrentHashMap<>();
-    private final ObjectMapper mapper     = new ObjectMapper();
+    private final Map<String, Book> books = new HashMap<>();
+
+    private static final ThreadLocal<ObjectMapper> MAPPER =
+            ThreadLocal.withInitial(ObjectMapper::new);
 
     public static void main(String[] args) throws Exception {
         new BestBidAskPrinter().start();
@@ -50,16 +48,10 @@ public class BestBidAskPrinter {
     private void start() throws Exception {
         WebSocketClient client = new WebSocketClient(new URI(WS_URI)) {
 
-            @Override public void onOpen(ServerHandshake hs) {
-                send(buildSubscribeMessage());
-            }
-            @Override public void onMessage(String msg) { handle(msg); }
-            @Override public void onClose(int c, String r, boolean rem) {
-                System.out.println("WebSocket closed: " + r + " – reconnecting…"); reconnect();
-            }
-            @Override public void onError(Exception ex) {
-                System.err.println("WebSocket error: " + ex.getMessage());
-            }
+            @Override public void onOpen(ServerHandshake hs) { send(buildSubscribeMessage()); }
+            @Override public void onMessage(String msg)      { handle(msg); }
+            @Override public void onClose(int c,String r,boolean rem){ System.out.println("WebSocket closed: "+r+" – reconnecting…");reconnect();}
+            @Override public void onError(Exception ex)      { System.err.println("WebSocket error: "+ex.getMessage()); }
         };
         client.connectBlocking();
     }
@@ -67,21 +59,21 @@ public class BestBidAskPrinter {
     /* ---------- message handling ---------- */
     private void handle(String raw) {
         try {
-            JsonNode root = mapper.readTree(raw);
+            JsonNode root = MAPPER.get().readTree(raw);
             if (!CHANNEL.equals(root.path("channel").asText())) return;
 
             JsonNode events = root.path("events");
             if (!events.isArray() || events.isEmpty()) return;
 
             JsonNode evt  = events.get(0);
-            String type = evt.path("type").asText();
-            String   product = evt.path("product_id").asText();
+            String type    = evt.path("type").asText();
+            String product = evt.path("product_id").asText();
             if (product.isEmpty()) return;
 
             JsonNode updates = evt.path("updates");
             if (!updates.isArray()) return;
 
-            books.putIfAbsent(product, new Book());
+            books.computeIfAbsent(product, p -> new Book());
             Book book = books.get(product);
 
             if ("snapshot".equals(type)) { book.bids.clear(); book.asks.clear(); }
