@@ -25,146 +25,134 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class BestBidAskPrinter {
 
-    private static final String WS_URI = "wss://ws-feed.prime.coinbase.com";
-    private static final String CHANNEL = "l2_data";
-    private static final String PRODUCT_ID = "ETH-USD";
+    private static final String WS_URI       = "wss://ws-feed.prime.coinbase.com";
+    private static final String CHANNEL      = "l2_data";
+    private static final String[] PRODUCT_IDS = {"ETH-USD", "BTC-USD"};
 
-    // bids: highest‑price first
-    private final TreeMap<Double, Double> bids =
-            new TreeMap<>((a, b) -> Double.compare(b, a));
-    // asks: lowest‑price first
-    private final TreeMap<Double, Double> asks = new TreeMap<>();
-
-    private final ObjectMapper mapper = new ObjectMapper();
+    private static class Book {
+        final TreeMap<Double, Double> bids = new TreeMap<>(Collections.reverseOrder());
+        final TreeMap<Double, Double> asks = new TreeMap<>();
+    }
+    private final Map<String, Book> books = new ConcurrentHashMap<>();
+    private final ObjectMapper mapper     = new ObjectMapper();
 
     public static void main(String[] args) throws Exception {
         new BestBidAskPrinter().start();
     }
 
     private void start() throws Exception {
-        URI uri = new URI(WS_URI);
-        WebSocketClient client = new WebSocketClient(uri) {
+        WebSocketClient client = new WebSocketClient(new URI(WS_URI)) {
 
-            @Override public void onOpen(ServerHandshake handshake) {
+            @Override public void onOpen(ServerHandshake hs) {
                 send(buildSubscribeMessage());
             }
-
-            @Override public void onMessage(String msg) {
-                handleMessage(msg);
+            @Override public void onMessage(String msg) { handle(msg); }
+            @Override public void onClose(int c, String r, boolean rem) {
+                System.out.println("WebSocket closed: " + r + " – reconnecting…"); reconnect();
             }
-
-            @Override public void onClose(int code, String reason, boolean remote) {
-                System.out.println("WebSocket closed: " + reason + " - reconnecting…");
-                reconnect();
-            }
-
             @Override public void onError(Exception ex) {
                 System.err.println("WebSocket error: " + ex.getMessage());
             }
         };
-
         client.connectBlocking();
     }
 
-    private void handleMessage(String raw) {
+    /* ---------- message handling ---------- */
+    private void handle(String raw) {
         try {
             JsonNode root = mapper.readTree(raw);
-            if (!root.path("channel").asText().equals(CHANNEL)) return;
+            if (!CHANNEL.equals(root.path("channel").asText())) return;
 
             JsonNode events = root.path("events");
             if (!events.isArray() || events.isEmpty()) return;
 
-            JsonNode firstEvent = events.get(0);
-            String type = firstEvent.path("type").asText();
+            JsonNode evt  = events.get(0);
+            String type = evt.path("type").asText();
+            String   product = evt.path("product_id").asText();
+            if (product.isEmpty()) return;
 
-            if ("snapshot".equals(type)) {
-                bids.clear();
-                asks.clear();
-                applyUpdates(firstEvent.path("updates"));
-            } else if ("l2update".equals(type) || "update".equals(type)) { // "update" for Prime
-                applyUpdates(firstEvent.path("updates"));
-            }
+            JsonNode updates = evt.path("updates");
+            if (!updates.isArray()) return;
 
-            printBestBidAsk();
-        } catch (Exception e) {
-            System.err.println("Failed to process message: " + e.getMessage());
+            books.putIfAbsent(product, new Book());
+            Book book = books.get(product);
+
+            if ("snapshot".equals(type)) { book.bids.clear(); book.asks.clear(); }
+            applyUpdates(updates, book);
+            printBBA(product, book);
+
+        } catch (Exception ex) {
+            System.err.println("Parse error: " + ex.getMessage());
         }
     }
 
-    private void applyUpdates(JsonNode updates) {
-        if (!updates.isArray()) return;
+    private void applyUpdates(JsonNode updates, Book book) {
         for (JsonNode u : updates) {
             String side = u.path("side").asText();
-            double price  = u.path("px").asDouble();
-            double qty    = u.path("qty").asDouble();
+            double px   = u.path("px").asDouble();
+            double qty  = u.path("qty").asDouble();
 
-            TreeMap<Double, Double> book = "bid".equals(side) ? bids : asks;
-            if (qty == 0.0) {
-                book.remove(price);
-            } else {
-                book.put(price, qty);
-            }
+            TreeMap<Double, Double> depth = "bid".equals(side) ? book.bids : book.asks;
+            if (qty == 0.0) depth.remove(px); else depth.put(px, qty);
         }
     }
 
-    private void printBestBidAsk() {
-        Map.Entry<Double, Double> bestBid = bids.firstEntry();
-        Map.Entry<Double, Double> bestAsk = asks.firstEntry();
-        if (bestBid != null && bestAsk != null) {
+    private void printBBA(String product, Book book) {
+        Map.Entry<Double, Double> bid = book.bids.firstEntry();
+        Map.Entry<Double, Double> ask = book.asks.firstEntry();
+        if (bid != null && ask != null) {
             System.out.printf(
-                    "Best Bid: %.8f (qty %.6f) | Best Ask: %.8f (qty %.6f)%n",
-                    bestBid.getKey(), bestBid.getValue(),
-                    bestAsk.getKey(), bestAsk.getValue());
+                    "%s → Best Bid: %.8f (qty %.6f) | Best Ask: %.8f (qty %.6f)%n",
+                    product, bid.getKey(), bid.getValue(), ask.getKey(), ask.getValue());
         }
     }
 
     private String buildSubscribeMessage() {
-        long ts = System.currentTimeMillis() / 1000;
-        String timestamp = String.valueOf(ts);
+        String ts  = String.valueOf(System.currentTimeMillis() / 1000);
+        String key = env("API_KEY"), sec = env("SECRET_KEY"),
+                pas = env("PASSPHRASE"), acct = env("SVC_ACCOUNTID");
 
-        String apiKey   = env("API_KEY");
-        String secret   = env("SECRET_KEY");
-        String pass     = env("PASSPHRASE");
-        String acctId   = env("SVC_ACCOUNTID");
-
-        String signature = sign(CHANNEL, apiKey, secret, acctId, timestamp, PRODUCT_ID);
+        String sig = sign(CHANNEL, key, sec, acct, ts, PRODUCT_IDS);
+        String prods = String.join("\",\"", PRODUCT_IDS);
 
         return String.format(
-                "{" +
-                        "\"type\":\"subscribe\"," +
-                        "\"channel\":\"%s\"," +
-                        "\"access_key\":\"%s\"," +
-                        "\"api_key_id\":\"%s\"," +
-                        "\"timestamp\":\"%s\"," +
-                        "\"passphrase\":\"%s\"," +
-                        "\"signature\":\"%s\"," +
-                        "\"product_ids\":[\"%s\"]" +
-                        "}", CHANNEL, apiKey, acctId, timestamp, pass, signature, PRODUCT_ID);
+                "{"
+                        + "\"type\":\"subscribe\","
+                        + "\"channel\":\"%s\","
+                        + "\"access_key\":\"%s\","
+                        + "\"api_key_id\":\"%s\","
+                        + "\"timestamp\":\"%s\","
+                        + "\"passphrase\":\"%s\","
+                        + "\"signature\":\"%s\","
+                        + "\"product_ids\":[\"%s\"]"
+                        + "}",
+                CHANNEL, key, acct, ts, pas, sig, prods
+        );
     }
 
-    private static String sign(String channel, String key, String secret,
-                               String accountId, String timestamp, String productId) {
-        String message = channel + key + accountId + timestamp + productId;
+    private static String sign(String ch, String key, String secret,
+                               String acct, String ts, String[] prods) {
+        String joined = String.join("", prods);
+        String msg    = ch + key + acct + ts + joined;
         try {
             Mac mac = Mac.getInstance("HmacSHA256");
             mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            byte[] rawSig = mac.doFinal(message.getBytes(StandardCharsets.UTF_8));
-            return Base64.getEncoder().encodeToString(rawSig);
-        } catch (GeneralSecurityException e) {
-            throw new RuntimeException("HMAC failure", e);
-        }
+            return Base64.getEncoder()
+                    .encodeToString(mac.doFinal(msg.getBytes(StandardCharsets.UTF_8)));
+        } catch (GeneralSecurityException e) { throw new RuntimeException(e); }
     }
 
-    private static String env(String name) {
-        String v = System.getenv(name);
-        if (v == null || v.isEmpty()) {
-            throw new IllegalStateException("Missing env var: " + name);
-        }
+    private static String env(String n) {
+        String v = System.getenv(n);
+        if (v == null || v.isEmpty())
+            throw new IllegalStateException("Missing env var: " + n);
         return v;
     }
 }
