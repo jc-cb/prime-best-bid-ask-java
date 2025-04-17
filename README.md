@@ -20,19 +20,19 @@ export PASSPHRASE=xxx
 export SVC_ACCOUNTID=xxx
 ```
 
-## 3. Specify the products to subscribe to
+## 3. Specify the subscription products
 
 Within the `BestBidAskPrinter` class, set the product IDs. Currently, Prime can support up to 10 products in the same WebSocket connection. 
 ```
     private static final String[] PRODUCT_IDS = {"ETH-USD", "BTC-USD"};
 ```
 
-## 3. Build the JAR
+## 4. Build the JAR
 ```
 mvn clean package              # produces target/prime-best-bid-ask-java-1.0.0.jar
 ```
 
-## 4. Run
+## 5. Run
 ```
 java -jar target/prime-best-bid-ask-java-1.0.0.jar
 ```
