@@ -107,7 +107,8 @@ public class BestBidAskPrinter {
     }
 
     private String buildSubscribeMessage() {
-        String ts  = String.valueOf(System.currentTimeMillis() / 1000);
+        long currentTimeMillis = System.currentTimeMillis();
+        String ts = String.valueOf(currentTimeMillis / 1000);
         String key = env("API_KEY"), sec = env("SECRET_KEY"),
                 pas = env("PASSPHRASE"), acct = env("SVC_ACCOUNTID");
 
